@@ -27,3 +27,6 @@
    ```bash
    git clone https://github.com/ProjectBoring/Roblox-Price-Watcher-v1.git
    cd Roblox-Price-Watcher-v1
+
+
+![image](https://github.com/user-attachments/assets/5294fd23-6987-440c-a094-37fd63f5611e)
