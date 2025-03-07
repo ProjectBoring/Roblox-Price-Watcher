@@ -1,6 +1,6 @@
-# Roblox Price Watcher v1.0
+# Roblox Price Watcher
 
-**Roblox Price Watcher v1.0** is a desktop application designed to monitor asset prices on Roblox, providing real-time updates and notifications via Discord webhooks when prices drop below user-defined thresholds. Built with ImGui and DirectX11, it offers an intuitive GUI for managing assets, setting thresholds, and debugging price checks.
+**Roblox Price Watcher** is a desktop application designed to monitor asset prices on Roblox, providing real-time updates and notifications via Discord webhooks when prices drop below user-defined thresholds. Built with ImGui and DirectX11, it offers an intuitive GUI for managing assets, setting thresholds, and debugging price checks.
 
 ## Features
 
