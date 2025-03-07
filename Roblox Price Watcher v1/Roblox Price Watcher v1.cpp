@@ -122,7 +122,7 @@ std::mutex assets_mutex;                              // Mutex for thread-safe a
 
 // Main function
 int main(int argc, char** argv) {
-    AllocateAndRedirectConsole(); // DON'T REMOVE!!! For debugging purposes.
+    // AllocateAndRedirectConsole(); // DON'T REMOVE!!! For debugging purposes.
 
     HINSTANCE hInstance = GetModuleHandle(NULL);
 
