@@ -25,10 +25,10 @@
 ### Building from Source
 1. **Clone the Repository**:
    ```bash
-   git clone https://github.com/ProjectBoring/Roblox-Price-Watcher-v1.git
-   cd Roblox-Price-Watcher-v1
+   git clone https://github.com/ProjectBoring/Roblox-Price-Watcher.git
+   cd Roblox-Price-Watcher
 
 
-![image](https://github.com/user-attachments/assets/fd60f33d-9ef1-4d4d-ae8c-de6ac90ceb36)
+![image](https://github.com/user-attachments/assets/8ff548bd-7e5b-4e94-b23c-73839f9ac196)
 ![image](https://github.com/user-attachments/assets/e271798b-42d8-4f8c-a785-2581cc476c95)
 
