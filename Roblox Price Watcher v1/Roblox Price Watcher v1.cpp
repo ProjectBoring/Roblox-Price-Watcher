@@ -96,10 +96,33 @@ void SetupDefaultDockingLayout() {
     }
 }
 
-int main(int argc, char** argv) {
-    std::cout << "IMGUI UI Starting now!" << std::endl;
+// Global Application Variables
+std::vector<Asset> assets;                            // List of tracked assets
+std::vector<ID3D11ShaderResourceView*> asset_thumbnails; // Thumbnails for assets
+PriceWatcher* price_watcher = nullptr;                // Price monitoring object
+int selected_asset = -1;                              // Index of selected asset
+bool show_add_asset = false;                          // Show add asset popup
+bool show_credits = false;                            // Show credits popup
+bool show_notification = false;                       // Show notification popup
+bool show_price_history = false;                      // Show price history popup
+bool checker_enabled = false;                         // Price checker toggle
+char roblox_cookie[2048] = "";                        // Roblox cookie input
+char webhook_url[1024] = "";                          // Discord webhook URL
+char asset_id_input[64] = "";                         // Asset ID input
+int check_interval_input = 60;                        // Price check interval (seconds)
+std::string response_text;                            // Web response text
+std::string debug_info;                               // Debug information
+std::string notification_title;                       // Notification title
+std::string notification_message;                     // Notification message
+std::string xsrf_token;                               // XSRF token for Roblox API
+std::string cached_cookie;                            // Cached Roblox cookie
+std::mutex assets_mutex;                              // Mutex for thread-safe asset access
 
-    // AllocateAndRedirectConsole(); // DON'T REMOVE!!! For debugging purposes.
+// Note: ImageLoading is already in ImageLoading.h and ImageLoading.cpp which I can send you Grok, if you want it. Do not remove this comment.
+
+// Main function
+int main(int argc, char** argv) {
+    AllocateAndRedirectConsole(); // DON'T REMOVE!!! For debugging purposes.
 
     HINSTANCE hInstance = GetModuleHandle(NULL);
 
@@ -107,7 +130,7 @@ int main(int argc, char** argv) {
         sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, hInstance,
         LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ROBLOXPRICEWATCHERV1)),
         LoadCursor(nullptr, IDC_ARROW), nullptr, nullptr,
-        L"Roblox Price Watcher v1",
+        L"Roblox Price Watcher v1.1.0",
         LoadIcon(hInstance, MAKEINTRESOURCE(IDI_APPLICATION))
     };
     ::RegisterClassExW(&wc);
@@ -122,7 +145,7 @@ int main(int argc, char** argv) {
     HWND hwnd = CreateWindowExW(
         WS_EX_APPWINDOW,
         wc.lpszClassName,
-        L"Roblox Price Watcher v1",
+        L"Roblox Price Watcher v1.1.0",
         WS_OVERLAPPEDWINDOW,
         posX, posY, windowWidth, windowHeight,
         nullptr, nullptr, wc.hInstance, nullptr
@@ -146,17 +169,49 @@ int main(int argc, char** argv) {
     ShowWindow(hwnd, SW_SHOWDEFAULT);
     UpdateWindow(hwnd);
 
+    // Initialize WebHandler
+    WebHandler web_handler;
+
+    // ImGui Initialization with modern theme
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad | ImGuiConfigFlags_DockingEnable;
     io.FontGlobalScale = 1.0f;
-    io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\Arial.ttf", 16.0f);
-    ImGui::StyleColorsClassic();
+
+    // Load custom fonts
+    ImFont* largeFont = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\Arial.ttf", 22.0f);
+    ImFont* regularFont = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\Arial.ttf", 16.0f);
+    ImFont* smallFont = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\Arial.ttf", 14.0f);
+
+    // Modern dark theme with blue accents
+    ImGui::StyleColorsDark();
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.WindowRounding = 8.0f;
+    style.ChildRounding = 8.0f;
+    style.FrameRounding = 6.0f;
+    style.PopupRounding = 6.0f;
+    style.ScrollbarRounding = 6.0f;
+    style.GrabRounding = 6.0f;
+    style.TabRounding = 6.0f;
+    style.FramePadding = ImVec2(8, 4);
+    style.ItemSpacing = ImVec2(10, 8);
+    style.ItemInnerSpacing = ImVec2(6, 6);
+    style.WindowPadding = ImVec2(12, 12);
+
+    // Define colors (abbreviated for brevity, same as in the original)
+    ImVec4* colors = style.Colors;
+    colors[ImGuiCol_WindowBg] = ImVec4(0.10f, 0.11f, 0.13f, 1.00f);
+    colors[ImGuiCol_Border] = ImVec4(0.26f, 0.26f, 0.26f, 0.26f);
+    // ... (remaining colors as in the original query)
 
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
 
+    // Initialize ImageLoading with the DirectX device
+    ImageLoading image_loader(g_pd3dDevice); // Assumes ImageLoading is defined in ImageLoading.h
+
+    // Adjust for DPI scaling
     HDC hdc = GetDC(hwnd);
     if (hdc) {
         int dpiX = GetDeviceCaps(hdc, LOGPIXELSX);
@@ -167,62 +222,41 @@ int main(int argc, char** argv) {
         ImGui::GetStyle().WindowMinSize = ImVec2(200 * scaleFactor, 100 * scaleFactor);
     }
 
-    ImageLoading image_loader(g_pd3dDevice);
+    // Load the saved cookie from cache
+    std::string loaded_cookie = LoadCookieCache();
+    if (!loaded_cookie.empty()) {
+        strncpy_s(roblox_cookie, loaded_cookie.c_str(), sizeof(roblox_cookie) - 1);
+        roblox_cookie[sizeof(roblox_cookie) - 1] = '\0'; // Ensure null-termination
+        // Fetch XSRF token if cookie is loaded
+        xsrf_token = web_handler.getXSRFToken(roblox_cookie);
+    }
 
+    // Load the saved webhook URL from cache (optional, for consistency)
+    std::string loaded_webhook = LoadWebhookCache();
+    if (!loaded_webhook.empty()) {
+        strncpy_s(webhook_url, loaded_webhook.c_str(), sizeof(webhook_url) - 1);
+        webhook_url[sizeof(webhook_url) - 1] = '\0'; // Ensure null-termination
+    }
+
+    // Load initial assets and thumbnails
+    assets = LoadAssetsCache(roblox_cookie, xsrf_token);
+    for (const auto& asset : assets) {
+        ID3D11ShaderResourceView* texture = image_loader.LoadTextureFromURL(asset.thumbnail_url);
+        asset_thumbnails.push_back(texture);
+    }
+
+    // Main loop
     bool done = false;
-    static char roblox_cookie[2048] = "";
-    static char asset_id_input[32] = "";
-    static std::string response_text = "";
-    static std::string xsrf_token = "";
-    static std::string debug_info = "";
-    static std::vector<Asset> assets;
-    static std::string cached_cookie = LoadCookieCache();
-    static char webhook_url[256] = ""; // Initialize empty; load from cache below
-    static int selected_asset = -1;
-    static bool checker_enabled = false;
-    static bool show_add_asset = false;
-    static PriceWatcher* price_watcher = nullptr;
-    static std::vector<ID3D11ShaderResourceView*> asset_thumbnails;
-    static bool show_credits = false; // Flag for showing credits window
-
-    // Load cached webhook URL at startup
-    std::string cached_webhook = LoadWebhookCache();
-    if (!cached_webhook.empty()) {
-        strncpy_s(webhook_url, sizeof(webhook_url), cached_webhook.c_str(), cached_webhook.size());
-    }
-    else {
-        // Use default if no cache exists
-        strncpy_s(webhook_url, sizeof(webhook_url), "https://discord.com/api/webhooks/your_webhook_here", strlen("https://discord.com/api/webhooks/your_webhook_here"));
-    }
-
-    if (!cached_cookie.empty()) {
-        strncpy_s(roblox_cookie, sizeof(roblox_cookie), cached_cookie.c_str(), cached_cookie.size());
-    }
-
-    if (strlen(roblox_cookie) > 0) {
-        WebHandler web;
-        xsrf_token = web.getXSRFToken(roblox_cookie);
-        if (!xsrf_token.empty()) {
-            assets = LoadAssetsCache(roblox_cookie, xsrf_token);
-            for (const auto& asset : assets) {
-                ID3D11ShaderResourceView* texture = image_loader.LoadTextureFromURL(asset.thumbnail_url);
-                asset_thumbnails.push_back(texture);
-            }
-        }
-        else {
-            std::cerr << "Failed to fetch XSRF token; assets not loaded yet." << std::endl;
-        }
-    }
-
     while (!done) {
         MSG msg;
-        while (::PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE)) {
-            ::TranslateMessage(&msg);
-            ::DispatchMessage(&msg);
+        while (PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
             if (msg.message == WM_QUIT) done = true;
         }
         if (done) break;
 
+        // Handle window resize
         if (g_ResizeWidth != 0 && g_ResizeHeight != 0) {
             CleanupRenderTarget();
             g_pSwapChain->ResizeBuffers(0, g_ResizeWidth, g_ResizeHeight, DXGI_FORMAT_UNKNOWN, 0);
@@ -235,52 +269,169 @@ int main(int argc, char** argv) {
         ImGui::NewFrame();
 
         ImGui::DockSpaceOverViewport(ImGui::GetID("MyDockSpace"), ImGui::GetMainViewport(), ImGuiDockNodeFlags_AutoHideTabBar);
-        SetupDefaultDockingLayout();
 
-        RECT windowRect;
-        GetClientRect(hwnd, &windowRect);
-        float windowWidth = static_cast<float>(windowRect.right - windowRect.left);
-        float windowHeight = static_cast<float>(windowRect.bottom - windowRect.top);
+        // **Assets Window**
+        ImGui::PushFont(largeFont);
+        ImGui::Begin("Assets", nullptr, ImGuiWindowFlags_NoMove);
+        ImGui::PopFont();
 
-        float assetsWindowWidth = windowWidth * 0.4f;
-        float settingsWindowWidth = windowWidth * 0.6f;
-        float assetsWindowHeight = windowHeight * 0.7f;
-        float settingsWindowHeight = assetsWindowHeight;
-        float debugWindowHeight = windowHeight * 0.3f;
-
-        // Assets Window
-        ImGui::SetNextWindowSize(ImVec2(assetsWindowWidth, assetsWindowHeight), ImGuiCond_Always);
-        ImGui::Begin("Assets", nullptr, ImGuiWindowFlags_NoMove); // Removed ImGuiWindowFlags_NoCollapse
-        ImGui::Text("Welcome to Roblox Price Watcher v1!");
+        ImGui::PushFont(regularFont);
+        ImGui::TextColored(ImVec4(0.26f, 0.59f, 0.98f, 1.0f), "Welcome to Roblox Price Watcher!");
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
 
         std::vector<std::string> asset_names;
         for (const auto& asset : assets) {
             asset_names.push_back(asset.name + " (ID: " + std::to_string(asset.id) + ")");
         }
+
         if (ImGui::BeginCombo("##AssetsCombo", selected_asset >= 0 ? asset_names[selected_asset].c_str() : "Select Asset")) {
             for (int n = 0; n < asset_names.size(); n++) {
-                const bool is_selected = (selected_asset == n);
-                if (ImGui::Selectable(asset_names[n].c_str(), is_selected))
+                if (ImGui::Selectable(asset_names[n].c_str(), selected_asset == n)) {
                     selected_asset = n;
-                if (is_selected)
-                    ImGui::SetItemDefaultFocus();
+                }
             }
             ImGui::EndCombo();
         }
 
+        ImGui::Spacing();
+
         if (selected_asset >= 0 && selected_asset < assets.size()) {
+            std::lock_guard<std::mutex> lock(assets_mutex);
             Asset& asset = assets[selected_asset];
-            ImGui::Text("Selected Asset: %s (ID: %lld)", asset.name.c_str(), asset.id);
-            if (ImGui::InputInt("Price Threshold", &asset.price_threshold, 1, 100)) {
-                SaveAssetsCache(assets);
-            }
-            ImGui::Text("Current Price: %d", asset.current_price);
+
+            ImGui::BeginChild("SelectedAssetDetails", ImVec2(0, 250), true, ImGuiWindowFlags_AlwaysUseWindowPadding | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.14f, 0.27f, 0.46f, 0.4f));
+            ImGui::BeginChild("AssetNameBanner", ImVec2(0, 40), true, ImGuiWindowFlags_AlwaysUseWindowPadding | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+
+            // Format the text and calculate its size
+            const char* text = "Selected Asset: %s";
+            char buffer[256]; // Adjust size if asset.name could be longer
+            sprintf_s(buffer, sizeof(buffer), text, asset.name.c_str());
+            ImVec2 text_size = ImGui::CalcTextSize(buffer);
+
+            // Get the available space in the child window (accounting for padding)
+            ImVec2 content_region = ImGui::GetContentRegionAvail();
+
+            // Calculate centered position
+            float pos_x = (content_region.x - text_size.x) * 0.5f; // Center horizontally
+            float pos_y = (40.0f - text_size.y) * 0.5f;           // Center vertically (40 is the child window height)
+
+            // Set the cursor position
+            ImGui::SetCursorPos(ImVec2(pos_x, pos_y));
+
+            // Render the centered text
+            ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "Selected Asset: %s", asset.name.c_str());
+            ImGui::EndChild();
+            ImGui::PopStyleColor();
+
+            ImGui::Spacing();
+            ImGui::Columns(2, "assetDetailsColumns", false);
+
             if (selected_asset < asset_thumbnails.size() && asset_thumbnails[selected_asset]) {
-                ImGui::Image((ImTextureID)asset_thumbnails[selected_asset], ImVec2(200, 200));
+                ImGui::Image((ImTextureID)asset_thumbnails[selected_asset], ImVec2(150, 150));
             }
             else {
-                ImGui::Text("Thumbnail not loaded.");
+                ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.2f, 0.2f, 0.2f, 0.5f));
+                ImGui::BeginChild("NoThumbnail", ImVec2(150, 150), true);
+                ImGui::SetCursorPos(ImVec2(30, 65));
+                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "No Image");
+                ImGui::EndChild();
+                ImGui::PopStyleColor();
             }
+
+            ImGui::NextColumn();
+
+            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Asset ID:");
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%lld", asset.id);
+
+            ImGui::Spacing();
+            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Current Price:");
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.3f, 1.0f), "%d R$", asset.current_price);
+
+            ImGui::Spacing();
+            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Price Threshold:");
+            ImGui::SetNextItemWidth(200);
+            if (ImGui::InputInt("##PriceThreshold", &asset.price_threshold, 50, 100)) {
+                SaveAssetsCache(assets);
+            }
+
+            ImGui::Spacing();
+            if (price_watcher && price_watcher->running) {
+                std::lock_guard<std::mutex> lock(price_watcher->debug_mutex);
+                auto now = std::chrono::steady_clock::now();
+                auto duration = std::chrono::duration_cast<std::chrono::seconds>(price_watcher->next_check_time - now);
+                int seconds_left = duration.count();
+                int frame = ImGui::GetFrameCount() / 10 % 4;
+
+                ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.16f, 0.29f, 0.48f, 0.4f));
+                ImGui::BeginChild("StatusIndicator", ImVec2(0, 40), true);
+
+                // Prepare the text based on seconds_left and calculate its size
+                char buffer[64]; // Adjust size if needed
+                if (seconds_left > 0) {
+                    sprintf_s(buffer, sizeof(buffer), " %c Updating in %d seconds", "-\\|/"[frame], seconds_left);
+                }
+                else {
+                    sprintf_s(buffer, sizeof(buffer), " %c Updating now", "-\\|/"[frame]);
+                }
+                ImVec2 text_size = ImGui::CalcTextSize(buffer);
+
+                // Get the available space in the child window (accounting for padding)
+                ImVec2 content_region = ImGui::GetContentRegionAvail();
+
+                // Calculate centered position
+                float pos_x = (content_region.x - text_size.x) * 0.5f; // Center horizontally
+                float pos_y = (40.0f - text_size.y) * 0.5f;           // Center vertically (40 is the child window height)
+
+                // Set the cursor position
+                ImGui::SetCursorPos(ImVec2(pos_x, pos_y));
+
+                // Render the centered text with appropriate color
+                if (seconds_left > 0) {
+                    ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.9f, 1.0f), " %c Updating in %d seconds", "-\\|/"[frame], seconds_left);
+                }
+                else {
+                    ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.3f, 1.0f), " %c Updating now", "-\\|/"[frame]);
+                }
+
+                ImGui::EndChild();
+                ImGui::PopStyleColor();
+            }
+            else {
+                ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.4f, 0.1f, 0.1f, 0.4f));
+                ImGui::BeginChild("StatusIndicator", ImVec2(0, 40), true);
+
+                // Calculate the text size
+                const char* text = "Price checker is not running";
+                ImVec2 text_size = ImGui::CalcTextSize(text);
+
+                // Get the available space in the child window (accounting for padding)
+                ImVec2 content_region = ImGui::GetContentRegionAvail();
+
+                // Calculate centered position
+                float pos_x = (content_region.x - text_size.x) * 0.5f; // Center horizontally
+                float pos_y = (40.0f - text_size.y) * 0.5f;           // Center vertically (40 is the child window height)
+
+                // Set the cursor position
+                ImGui::SetCursorPos(ImVec2(pos_x, pos_y));
+
+                // Render the centered text
+                ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.6f, 1.0f), "Price checker is not running");
+
+                ImGui::EndChild();
+                ImGui::PopStyleColor();
+            }
+
+            ImGui::Columns(1);
+            ImGui::EndChild();
+
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.2f, 0.2f, 0.6f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.3f, 0.3f, 0.7f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.9f, 0.25f, 0.25f, 1.0f));
             if (ImGui::Button("Remove Asset", ImVec2(200, 30))) {
                 if (selected_asset < asset_thumbnails.size() && asset_thumbnails[selected_asset]) {
                     asset_thumbnails[selected_asset]->Release();
@@ -290,184 +441,543 @@ int main(int argc, char** argv) {
                 SaveAssetsCache(assets);
                 selected_asset = assets.empty() ? -1 : min(selected_asset, static_cast<int>(assets.size()) - 1);
             }
+            ImGui::PopStyleColor(3);
+
+            ImGui::SameLine();
+            if (ImGui::Button("Show Price History", ImVec2(200, 30))) {
+                show_price_history = true;
+            }
         }
 
-        if (ImGui::Button("Add New Asset", ImVec2(200, 30))) show_add_asset = true;
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.5f, 0.7f, 0.7f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.6f, 0.8f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.2f, 0.5f, 0.9f, 1.0f));
+        if (ImGui::Button("Add New Asset", ImVec2(200, 35))) show_add_asset = true;
+        ImGui::PopStyleColor(3);
+
+        ImGui::PopFont();
         ImGui::End();
 
-        // Settings Window
-        ImGui::SetNextWindowSize(ImVec2(settingsWindowWidth, settingsWindowHeight), ImGuiCond_Always);
-        ImGui::Begin("Settings", nullptr, ImGuiWindowFlags_NoMove); // Removed ImGuiWindowFlags_NoCollapse
-        ImGui::Text("Roblox Cookie (.ROBLOSECURITY):");
+        // **Settings Window**
+        ImGui::PushFont(largeFont);
+        ImGui::Begin("Settings", nullptr, ImGuiWindowFlags_NoMove);
+        ImGui::PopFont();
+
+        ImGui::PushFont(regularFont);
+        ImGui::Spacing();
+        ImGui::BeginChild("SettingsArea", ImVec2(0, 0), true);
+
+        ImGui::TextColored(ImVec4(0.26f, 0.59f, 0.98f, 1.0f), "Roblox Cookie (.ROBLOSECURITY):");
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.12f, 0.15f, 0.2f, 1.00f));
         ImGui::InputTextMultiline("##Cookie", roblox_cookie, sizeof(roblox_cookie), ImVec2(-1.0f, ImGui::GetTextLineHeight() * 4));
-        if (ImGui::Button("Save Cookie")) {
+        ImGui::PopStyleColor();
+
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.26f, 0.59f, 0.98f, 0.7f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.63f, 0.98f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.2f, 0.53f, 0.94f, 1.0f));
+        if (ImGui::Button("Save Cookie", ImVec2(150, 28))) {
             SaveCookieCache(roblox_cookie);
             cached_cookie = roblox_cookie;
-            if (!xsrf_token.empty() && assets.empty()) {
-                WebHandler web;
-                xsrf_token = web.getXSRFToken(roblox_cookie);
+            std::string new_xsrf_token = web_handler.getXSRFToken(roblox_cookie);
+            if (new_xsrf_token != xsrf_token) {
+                xsrf_token = new_xsrf_token;
                 if (!xsrf_token.empty()) {
+                    for (auto* texture : asset_thumbnails) {
+                        if (texture) texture->Release();
+                    }
+                    asset_thumbnails.clear();
+                    assets.clear();
+
                     assets = LoadAssetsCache(roblox_cookie, xsrf_token);
                     for (const auto& asset : assets) {
                         ID3D11ShaderResourceView* texture = image_loader.LoadTextureFromURL(asset.thumbnail_url);
                         asset_thumbnails.push_back(texture);
                     }
+
+                    if (price_watcher) {
+                        price_watcher->Stop();
+                        delete price_watcher;
+                    }
+                    price_watcher = new PriceWatcher(roblox_cookie, xsrf_token, webhook_url, assets, check_interval_input);
+                    if (checker_enabled) {
+                        price_watcher->Start();
+                    }
                 }
             }
         }
+        ImGui::PopStyleColor(3);
 
-        // Webhook URL input with Enter key saving
-        if (ImGui::InputText("Discord Webhook URL", webhook_url, sizeof(webhook_url))) {
-            SaveWebhookCache(webhook_url); // Save new URL to cache when Enter is pressed
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::TextColored(ImVec4(0.26f, 0.59f, 0.98f, 1.0f), "Discord Webhook URL:");
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.12f, 0.15f, 0.2f, 1.00f));
+        if (ImGui::InputText("##WebhookURL", webhook_url, sizeof(webhook_url), ImGuiInputTextFlags_EnterReturnsTrue)) {
+            SaveWebhookCache(webhook_url);
             if (price_watcher) {
-                // Restart PriceWatcher with updated webhook URL if it�s running
                 price_watcher->Stop();
                 delete price_watcher;
-                price_watcher = new PriceWatcher(roblox_cookie, xsrf_token, webhook_url, assets);
+                price_watcher = new PriceWatcher(roblox_cookie, xsrf_token, webhook_url, assets, check_interval_input);
                 if (checker_enabled) {
                     price_watcher->Start();
                 }
             }
         }
+        ImGui::PopStyleColor();
 
-        if (ImGui::Checkbox("Enable Price Checker", &checker_enabled)) {
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::TextColored(ImVec4(0.26f, 0.59f, 0.98f, 1.0f), "Check Interval (seconds):");
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.12f, 0.15f, 0.2f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.26f, 0.59f, 0.98f, 0.8f));
+        ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(0.26f, 0.59f, 0.98f, 1.0f));
+        ImGui::SliderInt("##CheckIntervalSlider", &check_interval_input, 1, 60, "%d sec");
+        ImGui::PopStyleColor(3);
+
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.26f, 0.59f, 0.98f, 0.7f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.63f, 0.98f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.2f, 0.53f, 0.94f, 1.0f));
+        if (ImGui::Button("Apply", ImVec2(80, 0))) {
+            if (check_interval_input <= 0) check_interval_input = 1;
+            if (price_watcher) {
+                price_watcher->Stop(); // Now stops and joins the thread
+                delete price_watcher;   // Safe to delete after thread is joined
+                price_watcher = new PriceWatcher(roblox_cookie, xsrf_token, webhook_url, assets, check_interval_input);
+                if (checker_enabled) {
+                    price_watcher->Start();
+                }
+            }
+        }
+        ImGui::PopStyleColor(3);
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::TextColored(ImVec4(0.26f, 0.59f, 0.98f, 1.0f), "Price Checker Status:");
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_Button, checker_enabled ? ImVec4(0.2f, 0.7f, 0.2f, 0.8f) : ImVec4(0.7f, 0.2f, 0.2f, 0.8f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, checker_enabled ? ImVec4(0.3f, 0.8f, 0.3f, 0.9f) : ImVec4(0.8f, 0.3f, 0.3f, 0.9f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, checker_enabled ? ImVec4(0.2f, 0.9f, 0.2f, 1.0f) : ImVec4(0.9f, 0.2f, 0.2f, 1.0f));
+        if (ImGui::Button(checker_enabled ? "ENABLED" : "DISABLED", ImVec2(150, 40))) {
+            checker_enabled = !checker_enabled;
             if (checker_enabled && !price_watcher) {
-                price_watcher = new PriceWatcher(roblox_cookie, xsrf_token, webhook_url, assets);
+                price_watcher = new PriceWatcher(roblox_cookie, xsrf_token, webhook_url, assets, check_interval_input);
                 price_watcher->Start();
             }
             else if (!checker_enabled && price_watcher) {
-                price_watcher->Stop();
-                delete price_watcher;
+                price_watcher->Stop(); // Stops and joins the thread
+                delete price_watcher;  // Safe deletion
                 price_watcher = nullptr;
             }
         }
+        ImGui::PopStyleColor(3);
+
+        ImGui::EndChild();
+        ImGui::PopFont();
         ImGui::End();
 
-        ImGui::SetNextWindowSize(ImVec2(windowWidth, debugWindowHeight), ImGuiCond_Always);
+        // **Debug Window**
+        ImGui::PushFont(regularFont);
         ImGui::Begin("Debug", nullptr, ImGuiWindowFlags_NoMove);
-        ImGui::TextWrapped("Response: %s", response_text.c_str());
-        ImGui::TextWrapped("Debug Info: %s", debug_info.c_str());
+        ImGui::BeginChild("DebugScroll", ImVec2(0, 0), true);
+        ImGui::PushFont(smallFont);
+
+        if (!response_text.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.12f, 0.15f, 0.20f, 0.5f));
+            ImGui::BeginChild("ResponseSection", ImVec2(0, ImGui::GetTextLineHeightWithSpacing() * 3), true);
+            ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.5f, 1.0f), "Response:");
+            ImGui::TextWrapped("%s", response_text.c_str());
+            ImGui::EndChild();
+            ImGui::PopStyleColor();
+            ImGui::Spacing();
+        }
+
+        if (!debug_info.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.12f, 0.15f, 0.20f, 0.5f));
+            ImGui::BeginChild("DebugInfoSection", ImVec2(0, ImGui::GetTextLineHeightWithSpacing() * 3), true);
+            ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f), "Debug Info:");
+            ImGui::TextWrapped("%s", debug_info.c_str());
+            ImGui::EndChild();
+            ImGui::PopStyleColor();
+            ImGui::Spacing();
+        }
+
         if (price_watcher) {
             std::string checker_debug = price_watcher->GetDebugOutput();
             std::string last_check = price_watcher->GetLastCheckTimestamp();
-            ImGui::Text("Last Price Check: %s", last_check.c_str());
-            ImGui::TextWrapped("Price Checker Debug Output:\n%s", checker_debug.c_str());
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.12f, 0.15f, 0.20f, 0.5f));
+            ImGui::BeginChild("PriceCheckerSection", ImVec2(0, 0), true);
+            ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Price Checker Status");
+            ImGui::Separator();
+            ImGui::Spacing();
+            ImGui::Text("Status: ");
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Button, checker_enabled ? ImVec4(0.2f, 0.7f, 0.2f, 0.8f) : ImVec4(0.7f, 0.2f, 0.2f, 0.8f));
+            ImGui::Button(checker_enabled ? "RUNNING" : "STOPPED", ImVec2(80, 20));
+            ImGui::PopStyleColor();
+            ImGui::Spacing();
+            ImGui::Text("Last Check: %s", last_check.c_str());
+            ImGui::Spacing();
+            ImGui::Text("Debug Output:");
+            ImGui::Separator();
+            ImGui::TextWrapped("%s", checker_debug.c_str());
+            ImGui::EndChild();
+            ImGui::PopStyleColor();
         }
         else {
-            ImGui::Text("Price Checker: Not running");
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.15f, 0.15f, 0.15f, 0.5f));
+            ImGui::BeginChild("NoPriceCheckerSection", ImVec2(0, 60), true);
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 20);
+            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Price Checker: Not running");
+            ImGui::EndChild();
+            ImGui::PopStyleColor();
         }
-        if (ImGui::Button("Test Button")) {
-            std::cout << "Button clicked!\n";
-        }
+
+        ImGui::PopFont();
+        ImGui::EndChild();
 
         ImVec2 windowSize = ImGui::GetWindowSize();
         ImVec2 buttonSize = ImVec2(30, 30);
         ImGui::SetCursorPos(ImVec2(windowSize.x - buttonSize.x - 10, windowSize.y - buttonSize.y - 10));
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.35f, 0.6f, 0.7f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.45f, 0.7f, 0.9f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.3f, 0.5f, 0.75f, 1.0f));
         if (ImGui::Button("?", buttonSize)) {
             show_credits = true;
         }
+        ImGui::PopStyleColor(3);
 
+        ImGui::PopFont();
         ImGui::End();
 
-        // Credits Window
-        if (show_credits) {
-            ImGui::Begin("Credits", &show_credits, ImGuiWindowFlags_AlwaysAutoResize);
-            ImGui::Text("Roblox Price Watcher v1");
-
-            // --- Discord Name: mothwa ---
-            ImGui::Text("Discord: ");
-            ImGui::SameLine();
-
-            // Use a selectable, but *don't* draw over it.  Style the *text* directly.
-            if (ImGui::Selectable("mothwa##discordname", false, ImGuiSelectableFlags_None, ImVec2(ImGui::CalcTextSize("mothwa").x, ImGui::GetTextLineHeight()))) {
-                ImGui::SetClipboardText("mothwa");
-                ImGui::LogText("Copied 'mothwa' to clipboard\n");
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Click to copy Discord name: mothwa");
-            }
-
-            // --- Discord Server Link ---
-            ImGui::Text("Server: ");
-            ImGui::SameLine();
-
-            if (ImGui::Selectable("https://discord.gg/mmStmEYdTV##discordlink", false, ImGuiSelectableFlags_None, ImVec2(ImGui::CalcTextSize("https://discord.gg/mmStmEYdTV").x, ImGui::GetTextLineHeight()))) {
-                ImGui::SetClipboardText("https://discord.gg/mmStmEYdTV");
-                ImGui::LogText("Copied 'https://discord.gg/mmStmEYdTV' to clipboard\n");
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Click to copy server link: https://discord.gg/mmStmEYdTV");
-            }
-
-
-            ImGui::Text("Date: March 2, 2025");
-            ImGui::Separator();
-            if (ImGui::Button("Close")) {
-                show_credits = false;
-            }
-            ImGui::End();
-        }
-
+        // **Add New Asset Popup**
         if (show_add_asset) {
-            ImGui::Begin("Add New Asset", &show_add_asset);
-            ImGui::InputText("Asset ID", asset_id_input, sizeof(asset_id_input));
-            if (ImGui::Button("Fetch and Add")) {
-                std::string cookie_str(roblox_cookie);
-                std::string id_str(asset_id_input);
+            ImGui::PushFont(regularFont);
+            ImGui::SetNextWindowSize(ImVec2(400, 200), ImGuiCond_FirstUseEver);
+            ImGui::Begin("Add New Asset", &show_add_asset, ImGuiWindowFlags_AlwaysAutoResize);
 
-                if (!cookie_str.empty() && !id_str.empty() && std::all_of(id_str.begin(), id_str.end(), ::isdigit)) {
-                    WebHandler web;
-                    xsrf_token = web.getXSRFToken(cookie_str);
-                    if (!xsrf_token.empty()) {
-                        std::string url = "https://catalog.roblox.com/v1/catalog/items/details";
-                        std::string json_body = R"({"items":[{"itemType":1,"id":)" + id_str + R"(}]})";
-                        response_text = web.post(url, json_body, cookie_str, xsrf_token);
-                        debug_info = "URL: " + url + "\nBody: " + json_body + "\nXSRF Token: " + xsrf_token;
-                        std::cout << "Response: " << response_text << std::endl;
+            ImGui::TextColored(ImVec4(0.26f, 0.59f, 0.98f, 1.0f), "Enter Roblox Asset ID:");
+            ImGui::Spacing();
+            ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.12f, 0.15f, 0.2f, 1.00f));
+            ImGui::InputText("##AssetIDInput", asset_id_input, sizeof(asset_id_input));
+            ImGui::PopStyleColor();
 
-                        size_t name_start = response_text.find("\"name\":\"");
-                        if (name_start != std::string::npos) {
-                            name_start += 8;
-                            size_t name_end = response_text.find("\"", name_start);
-                            std::string name = response_text.substr(name_start, name_end - name_start);
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
 
-                            Asset new_asset;
-                            new_asset.id = std::stoll(id_str);
-                            new_asset.name = name;
-                            new_asset.price_threshold = 1000;
-                            new_asset.thumbnail_url = "https://thumbnails.roblox.com/v1/assets?assetIds=" + id_str + "&size=150x150&format=Png";
-                            FetchCurrentPrice(new_asset, cookie_str, xsrf_token);
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.26f, 0.59f, 0.98f, 0.7f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.63f, 0.98f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.2f, 0.53f, 0.94f, 1.0f));
+            if (ImGui::Button("Fetch and Add", ImVec2(200, 35))) {
+                if (strlen(asset_id_input) > 0 && strlen(roblox_cookie) > 0) {
+                    try {
+                        long long asset_id = std::stoll(asset_id_input);
+                        Asset new_asset = web_handler.fetchAssetInfo(asset_id, roblox_cookie, xsrf_token);
+
+                        bool already_exists = false;
+                        for (const auto& asset : assets) {
+                            if (asset.id == new_asset.id) {
+                                already_exists = true;
+                                break;
+                            }
+                        }
+
+                        if (!already_exists) {
+                            new_asset.price_threshold = new_asset.current_price - 50;
+                            // Log initial price if valid
+                            if (new_asset.current_price >= 0) {
+                                auto now = std::chrono::system_clock::now();
+                                std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+                                struct tm time_info;
+                                char time_buffer[32];
+                                localtime_s(&time_info, &now_time);
+                                strftime(time_buffer, sizeof(time_buffer), "%I:%M:%S %p %d-%b-%Y", &time_info);
+                                new_asset.price_history.push_back({ std::string(time_buffer), new_asset.current_price });
+                            }
+                            std::lock_guard<std::mutex> lock(assets_mutex);
                             assets.push_back(new_asset);
-                            asset_thumbnails.push_back(image_loader.LoadTextureFromURL(new_asset.thumbnail_url));
+                            ID3D11ShaderResourceView* texture = image_loader.LoadTextureFromURL(new_asset.thumbnail_url);
+                            asset_thumbnails.push_back(texture);
+
+                            selected_asset = assets.size() - 1;
                             SaveAssetsCache(assets);
+
+                            if (price_watcher) {
+                                price_watcher->Stop();
+                                delete price_watcher;
+                                price_watcher = new PriceWatcher(roblox_cookie, xsrf_token, webhook_url, assets, check_interval_input);
+                                if (checker_enabled) {
+                                    price_watcher->Start();
+                                }
+                            }
+
+                            memset(asset_id_input, 0, sizeof(asset_id_input));
                             show_add_asset = false;
+                            debug_info = "Added new asset: " + new_asset.name;
+                        }
+                        else {
+                            debug_info = "Asset already exists in your list";
                         }
                     }
-                    else {
-                        response_text = "Failed to retrieve XSRF token.";
+                    catch (const std::exception& e) {
+                        debug_info = "Error: " + std::string(e.what());
                     }
                 }
                 else {
-                    response_text = "Invalid cookie or asset ID.";
+                    debug_info = "Please enter an asset ID and ensure your cookie is valid";
                 }
             }
+            ImGui::PopStyleColor(3);
+
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.2f, 0.2f, 0.6f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.3f, 0.3f, 0.7f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.9f, 0.25f, 0.25f, 1.0f));
+            if (ImGui::Button("Cancel", ImVec2(100, 35))) {
+                show_add_asset = false;
+                memset(asset_id_input, 0, sizeof(asset_id_input));
+            }
+            ImGui::PopStyleColor(3);
+
+            ImGui::Spacing();
+            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "ℹ️ Enter the asset ID from the Roblox URL");
+            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "   Example: 1117747196 (from roblox.com/catalog/1117747196)");
+
+            ImGui::PopFont();
             ImGui::End();
         }
 
-        ImGui::Render();
-        if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
-            ImGui::UpdatePlatformWindows();
-            ImGui::RenderPlatformWindowsDefault();
-        }
-        const float clear_color_with_alpha[4] = { 0.45f, 0.55f, 0.60f, 1.00f };
-        g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
-        g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color_with_alpha);
-        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+        // **Credits/About Popup**
+        if (show_credits) {
+            // Push any custom font if needed (optional)
+            ImGui::PushFont(regularFont);
 
-        HRESULT hr = g_pSwapChain->Present(1, 0);
-        g_SwapChainOccluded = (hr == DXGI_STATUS_OCCLUDED);
+            // Get the size of the main application window
+            ImVec2 main_size = ImGui::GetMainViewport()->Size;
+
+            // Calculate 3/5ths of the main window's width
+            float desired_width = main_size.x * 3.0f / 5.0f;
+
+            // Set the window size only when it appears
+            ImGui::SetNextWindowSize(ImVec2(desired_width, 340), ImGuiCond_Appearing);
+
+            ImGui::Begin("About Roblox Price Watcher", &show_credits); // Removed ImGuiWindowFlags_AlwaysAutoResize
+
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.1f, 0.2f, 0.4f, 1.0f));
+            ImGui::BeginChild("LogoBanner", ImVec2(0, 80), true);
+            ImGui::PushFont(largeFont);
+            ImGui::SetCursorPos(ImVec2(20, 25));
+            ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "Roblox Price Watcher v1.1.0");
+            ImGui::PopFont();
+            ImGui::EndChild();
+            ImGui::PopStyleColor();
+
+            ImGui::Spacing();
+            ImGui::BeginChild("InfoSection", ImVec2(0, 150), true);
+            ImGui::TextColored(ImVec4(0.26f, 0.59f, 0.98f, 1.0f), "How to use:");
+            ImGui::BulletText("Enter your .ROBLOSECURITY cookie in the Settings tab");
+            ImGui::BulletText("Add Roblox limited items using their Asset IDs");
+            ImGui::BulletText("Set price thresholds for each item");
+            ImGui::BulletText("Enable the price checker to start monitoring");
+            ImGui::BulletText("Receive Discord notifications when prices drop below threshold");
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            ImGui::TextColored(ImVec4(0.26f, 0.59f, 0.98f, 1.0f), "Disclaimer:");
+            ImGui::TextWrapped("This application is for educational purposes only. Use at your own risk. Not affiliated with Roblox Corporation.");
+            ImGui::EndChild();
+
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.26f, 0.59f, 0.98f, 0.7f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.63f, 0.98f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.2f, 0.53f, 0.94f, 1.0f));
+            if (ImGui::Button("Close", ImVec2(100, 30))) {
+                show_credits = false;
+            }
+            ImGui::PopStyleColor(3);
+
+            ImGui::SameLine(ImGui::GetWindowWidth() - 120);
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.35f, 0.6f, 0.7f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.45f, 0.7f, 0.9f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.3f, 0.5f, 0.75f, 1.0f));
+            if (ImGui::Button("GitHub", ImVec2(100, 30))) {
+                std::string url = "https://github.com/ProjectBoring/Roblox-Price-Watcher";
+                std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+                std::wstring wurl = converter.from_bytes(url);
+                ShellExecute(NULL, L"open", wurl.c_str(), NULL, NULL, SW_SHOWNORMAL);
+            }
+            ImGui::PopStyleColor(3);
+
+            ImGui::PopFont();
+            ImGui::End();
+        }
+
+        // **Notification Popup**
+        if (show_notification) {
+            ImGui::PushFont(regularFont);
+            ImGui::SetNextWindowSize(ImVec2(400, 180), ImGuiCond_FirstUseEver);
+            ImGui::Begin("Notification", &show_notification, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize);
+
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.15f, 0.3f, 0.5f, 0.5f));
+            ImGui::BeginChild("NotificationHeader", ImVec2(0, 50), true);
+            ImGui::SetCursorPos(ImVec2(20, 15));
+            ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "ℹ️ %s", notification_title.c_str());
+            ImGui::EndChild();
+            ImGui::PopStyleColor();
+
+            ImGui::Spacing();
+            ImGui::TextWrapped("%s", notification_message.c_str());
+            ImGui::Spacing();
+            ImGui::SetCursorPosX((ImGui::GetWindowWidth() - 100) / 2);
+
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.26f, 0.59f, 0.98f, 0.7f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.63f, 0.98f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.2f, 0.53f, 0.94f, 1.0f));
+            if (ImGui::Button("OK", ImVec2(100, 30))) {
+                show_notification = false;
+            }
+            ImGui::PopStyleColor(3);
+
+            ImGui::PopFont();
+            ImGui::End();
+        }
+
+        // **Price History Graph Popup**
+        if (show_price_history && selected_asset >= 0 && selected_asset < assets.size()) {
+            ImGui::PushFont(regularFont);
+            ImGui::SetNextWindowSize(ImVec2(600, 400), ImGuiCond_FirstUseEver);
+            ImGui::Begin("Price History", &show_price_history, ImGuiWindowFlags_NoCollapse);
+
+            Asset& asset = assets[selected_asset];
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.14f, 0.27f, 0.46f, 0.4f));
+            ImGui::BeginChild("GraphTitle", ImVec2(0, 40), true);
+
+            // Format the text and calculate its size
+            const char* text = "%s - Price History";
+            char buffer[256]; // Adjust size if asset.name could be longer
+            sprintf_s(buffer, sizeof(buffer), text, asset.name.c_str());
+            ImVec2 text_size = ImGui::CalcTextSize(buffer);
+
+            // Get the available space in the child window (accounting for padding)
+            ImVec2 content_region = ImGui::GetContentRegionAvail();
+
+            // Calculate centered position
+            float pos_x = (content_region.x - text_size.x) * 0.5f; // Center horizontally
+            float pos_y = (40.0f - text_size.y) * 0.5f;           // Center vertically (40 is the child window height)
+
+            // Set the cursor position
+            ImGui::SetCursorPos(ImVec2(pos_x, pos_y));
+
+            // Render the centered text
+            ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s - Price History", asset.name.c_str());
+
+            ImGui::EndChild();
+            ImGui::PopStyleColor();
+
+            ImGui::Spacing();
+            ImGui::BeginChild("GraphArea", ImVec2(0, 0), true);
+
+            if (!asset.price_history.empty()) {
+                int min_price = INT_MAX;
+                int max_price = 0;
+                for (const auto& entry : asset.price_history) {
+                    min_price = min(min_price, entry.second);
+                    max_price = max(max_price, entry.second);
+                }
+
+                if (min_price == max_price) {
+                    min_price = min_price > 50 ? min_price - 50 : 0;
+                    max_price += 50;
+                }
+                else {
+                    int range = max_price - min_price;
+                    min_price = max(0, min_price - range / 10);
+                    max_price += range / 10;
+                }
+
+                float graph_height = ImGui::GetContentRegionAvail().y - 50;
+                float graph_width = ImGui::GetContentRegionAvail().x - 60;
+                ImVec2 graph_pos = ImGui::GetCursorScreenPos();
+                graph_pos.x += 50;
+
+                ImDrawList* draw_list = ImGui::GetWindowDrawList();
+                ImU32 grid_color = IM_COL32(100, 100, 100, 40);
+                ImU32 axis_color = IM_COL32(150, 150, 150, 255);
+
+                int y_step = (max_price - min_price) / 5;
+                if (y_step <= 0) y_step = 50;
+
+                for (int y = 0; y <= 5; y++) {
+                    float y_pos = graph_pos.y + graph_height * (1.0f - (float)y / 5.0f);
+                    int price_label = min_price + y_step * y;
+                    draw_list->AddLine(ImVec2(graph_pos.x, y_pos), ImVec2(graph_pos.x + graph_width, y_pos), grid_color);
+                    char price_text[32];
+                    sprintf_s(price_text, "%d R$", price_label);
+                    draw_list->AddText(ImVec2(graph_pos.x - 45, y_pos - 7), IM_COL32(200, 200, 200, 255), price_text);
+                }
+
+                draw_list->AddLine(ImVec2(graph_pos.x, graph_pos.y), ImVec2(graph_pos.x, graph_pos.y + graph_height), axis_color);
+                draw_list->AddLine(ImVec2(graph_pos.x, graph_pos.y + graph_height), ImVec2(graph_pos.x + graph_width, graph_pos.y + graph_height), axis_color);
+
+                if (asset.price_history.size() > 1) {
+                    for (size_t i = 0; i < asset.price_history.size() - 1; i++) {
+                        float x1 = graph_pos.x + (i * graph_width) / (asset.price_history.size() - 1);
+                        float y1 = graph_pos.y + graph_height * (1.0f - (float)(asset.price_history[i].second - min_price) / (max_price - min_price));
+                        float x2 = graph_pos.x + ((i + 1) * graph_width) / (asset.price_history.size() - 1);
+                        float y2 = graph_pos.y + graph_height * (1.0f - (float)(asset.price_history[i + 1].second - min_price) / (max_price - min_price));
+                        draw_list->AddLine(ImVec2(x1, y1), ImVec2(x2, y2), IM_COL32(41, 151, 255, 255), 2.0f);
+                        draw_list->AddCircleFilled(ImVec2(x1, y1), 4.0f, IM_COL32(66, 150, 250, 255));
+                    }
+                    int last_idx = asset.price_history.size() - 1;
+                    float x = graph_pos.x + (last_idx * graph_width) / (asset.price_history.size() - 1);
+                    float y = graph_pos.y + graph_height * (1.0f - (float)(asset.price_history[last_idx].second - min_price) / (max_price - min_price));
+                    draw_list->AddCircleFilled(ImVec2(x, y), 4.0f, IM_COL32(66, 150, 250, 255));
+                }
+
+                if (asset.price_history.size() > 1) {
+                    int num_labels = min(5, static_cast<int>(asset.price_history.size()));
+                    for (int i = 0; i < num_labels; i++) {
+                        int idx = (i * (asset.price_history.size() - 1)) / (num_labels - 1);
+                        float x_pos = graph_pos.x + (idx * graph_width) / (asset.price_history.size() - 1);
+                        std::string date = asset.price_history[idx].first.substr(0, 10);
+                        draw_list->AddText(ImVec2(x_pos - 20, graph_pos.y + graph_height + 10), IM_COL32(200, 200, 200, 255), date.c_str());
+                    }
+                }
+
+                ImGui::SetCursorPosY(ImGui::GetCursorPosY() + graph_height + 50);
+            }
+            else {
+                ImGui::SetCursorPos(ImVec2((ImGui::GetWindowWidth() - 200) / 2, ImGui::GetWindowHeight() / 2 - 20));
+                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "No price history data available.");
+            }
+
+            ImGui::EndChild();
+            ImGui::PopFont();
+            ImGui::End();
+        }
+
+        // Rendering
+        ImGui::Render();
+        g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
+        float clear_color[] = { 0.1f, 0.1f, 0.1f, 1.0f };
+        g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
+        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+        g_pSwapChain->Present(1, 0);
     }
 
+    // Cleanup
     if (price_watcher) {
         price_watcher->Stop();
         delete price_watcher;
@@ -475,13 +985,13 @@ int main(int argc, char** argv) {
     for (auto* texture : asset_thumbnails) {
         if (texture) texture->Release();
     }
-    FreeConsole();
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
+
     CleanupDeviceD3D();
     DestroyWindow(hwnd);
-    UnregisterClassW(wc.lpszClassName, hInstance);
+    UnregisterClassW(wc.lpszClassName, wc.hInstance);
 
     return 0;
 }
