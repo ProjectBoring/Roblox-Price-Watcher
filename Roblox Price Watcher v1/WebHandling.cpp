@@ -1,5 +1,6 @@
 #include "WebHandling.h"
 #include <iostream>
+#include "PriceWatchingEnergySaver.h"
 
 WebHandler::WebHandler() {
     curl = curl_easy_init();
@@ -94,6 +95,56 @@ std::string WebHandler::getXSRFToken(const std::string& cookie) {
         }
     }
     return token;
+}
+
+Asset WebHandler::fetchAssetInfo(long long asset_id, const std::string& cookie, const std::string& xsrf_token) {
+    Asset asset;
+    asset.id = asset_id;
+    asset.current_price = -1; // Initialize to -1
+
+    std::string url = "https://catalog.roblox.com/v1/catalog/items/details";
+    std::string json_body = R"({"items":[{"itemType":1,"id":)" + std::to_string(asset_id) + R"(}]})";
+
+    std::string response = post(url, json_body, cookie, xsrf_token);
+
+    if (!response.empty()) {
+        try {
+            nlohmann::json json_response = nlohmann::json::parse(response);
+            if (json_response.contains("data") && !json_response["data"].empty()) {
+                auto& data = json_response["data"][0];
+
+                asset.name = data.value("name", "Unknown Asset"); // Use value() with default
+
+                // Get the price.  Prioritize "lowestPrice", then "price", then default to -1.
+                if (data.contains("lowestPrice") && !data["lowestPrice"].is_null()) {
+                    asset.current_price = data["lowestPrice"].get<int>();
+                }
+                else if (data.contains("price") && !data["price"].is_null()) {
+                    asset.current_price = data["price"].get<int>();
+                }
+                else {
+                    asset.current_price = -1; // No price available
+                }
+
+                asset.thumbnail_url = "https://thumbnails.roblox.com/v1/assets?assetIds=" + std::to_string(asset_id) + "&size=150x150&format=Png";
+                asset.notified = false; // Initialize to false
+            }
+            else
+            {
+                std::cerr << "fetchAssetInfo: No data found in response for asset ID: " << asset_id << std::endl;
+            }
+        }
+        catch (const std::exception& e) {
+            std::cerr << "fetchAssetInfo: JSON parsing error: " << e.what() << std::endl;
+            //  Return the asset with default values (id set, name "Unknown", price -1)
+        }
+    }
+    else
+    {
+        std::cerr << "fetchAssetInfo: Empty response from post request for asset ID: " << asset_id << std::endl;
+    }
+
+    return asset;
 }
 
 size_t WebHandler::writeCallback(void* contents, size_t size, size_t nmemb, std::string* data) {
