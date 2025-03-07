@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Roblox Price Watcher v1.1.0</title>
+    <!-- Favicon using local .png -->
+    <link rel="icon" type="image/png" href="discord-logo.png">
+    <style>
+        :root {
+            --primary-color: #333;
+            --secondary-color: #555;
+            --background-color: #fff;
+            --container-width: 800px;
+            --spacing-unit: 20px;
+            --discord-color: #5865F2;
+        }
+        
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            margin: 0;
+            padding: var(--spacing-unit);
+            color: var(--primary-color);
+            background-color: var(--background-color);
+        }
+        
+        .container {
+            max-width: var(--container-width);
+            margin: 0 auto;
+            padding: var(--spacing-unit);
+        }
+        
+        header {
+            text-align: center;
+            margin-bottom: var(--spacing-unit);
+        }
+        
+        h1 {
+            color: var(--primary-color);
+            margin-bottom: 10px;
+        }
+        
+        h2 {
+            color: var(--primary-color);
+            margin-top: 30px;
+            margin-bottom: 15px;
+            border-bottom: 1px solid #eee;
+            padding-bottom: 10px;
+        }
+        
+        .date {
+            font-style: italic;
+            color: var(--secondary-color);
+            margin-bottom: var(--spacing-unit);
+        }
+        
+        .description {
+            text-align: justify;
+            margin-bottom: var(--spacing-unit);
+            color: var(--secondary-color);
+            line-height: 1.8;
+        }
+        
+        .feature-list {
+            margin-left: 30px;
+            margin-bottom: var(--spacing-unit);
+        }
+        
+        .feature-list li {
+            margin-bottom: 10px;
+        }
+        
+        .future-plans {
+            background-color: #f9f9f9;
+            padding: 15px;
+            border-radius: 5px;
+            border-left: 4px solid #007bff;
+        }
+        
+        .discord-section {
+            margin-top: 30px;
+            text-align: center;
+            padding: 20px;
+            background-color: #f6f6f6;
+            border-radius: 8px;
+        }
+        
+        .discord-link {
+            display: inline-flex;
+            align-items: center;
+            padding: 10px 20px;
+            background-color: var(--discord-color);
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            font-weight: bold;
+            transition: background-color 0.3s;
+        }
+        
+        .discord-link:hover {
+            background-color: #4752c4;
+        }
+        
+        .discord-logo {
+            width: 30px;
+            height: 30px;
+            margin-right: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Roblox Price Watcher v1.1.0</h1>
+            <p class="date"><strong>Date:</strong> March 6, 2025</p>
+        </header>
+        
+        <p class="description">
+            Roblox Price Watcher v1.1.0 is a desktop application designed to monitor the prices of Roblox limited items. Built with C++, DirectX, and ImGui, it provides a user-friendly interface to track asset prices, set thresholds, and receive Discord notifications when prices drop below user-defined limits. This version includes core functionality with more features planned for future releases.
+        </p>
+        
+        <h2>Current Features:</h2>
+        <ul class="feature-list">
+            <li>Track Roblox limited items by Asset ID with real-time price monitoring.</li>
+            <li>Set custom price thresholds for each asset to trigger notifications.</li>
+            <li>Receive Discord webhook alerts when an asset's price falls below its threshold, formatted for clear readability.</li>
+            <li>Visualize price history with an interactive graph showing price changes over time.</li>
+            <li>Persistent storage of assets, cookies, and price history in local cache files.</li>
+            <li>Modern dark-themed UI with docking support and customizable check intervals.</li>
+            <li>Thread-safe price checking with concurrent API requests for efficiency.</li>
+        </ul>
+        
+        <h2>Future Plans:</h2>
+        <div class="future-plans">
+            <p>
+                This is just the beginning! More features are to be added, including an entire proxy system planned for a future release. The proxy system will allow users to access Roblox APIs without hitting rate limits, enabling seamless and uninterrupted price monitoring for a larger number of assets. Stay tuned for updates!
+            </p>
+        </div>
+        
+        <div class="discord-section">
+            <h2>Join Our Community</h2>
+            <p>Connect with other users, get support, and stay updated on the latest developments:</p>
+            <a href="https://discord.gg/mmStmEYdTV" class="discord-link" target="_blank">
+                <!-- Use local .png for inline image -->
+                <img src="discord-logo.png" alt="Discord Logo" class="discord-logo">
+                Join "Price Watcher" Discord
+            </a>
+        </div>
+    </div>
+</body>
+</html>
