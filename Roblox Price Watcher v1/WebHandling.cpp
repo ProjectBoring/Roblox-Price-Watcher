@@ -10,8 +10,9 @@ WebHandler::~WebHandler() {
     if (curl) curl_easy_cleanup(curl);
 }
 
-std::string WebHandler::post(const std::string& url, const std::string& json_body, const std::string& cookie, const std::string& xsrf_token) {
+std::pair<std::string, long> WebHandler::post(const std::string& url, const std::string& json_body, const std::string& cookie, const std::string& xsrf_token) {
     std::string response;
+    long status_code = 0;
     if (curl) {
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_POST, 1L);
@@ -31,13 +32,16 @@ std::string WebHandler::post(const std::string& url, const std::string& json_bod
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
         CURLcode res = curl_easy_perform(curl);
-        curl_slist_free_all(headers);
-        if (res != CURLE_OK) {
-            std::cerr << "CURL error (post): " << curl_easy_strerror(res) << std::endl;
-            return "Error: Failed to fetch data.";
+        if (res == CURLE_OK) {
+            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status_code);
         }
+        else {
+            std::cerr << "CURL error (post): " << curl_easy_strerror(res) << std::endl;
+            status_code = -1; // Indicate failure
+        }
+        curl_slist_free_all(headers);
     }
-    return response;
+    return { response, status_code };
 }
 
 std::string WebHandler::get(const std::string& url) {
@@ -97,7 +101,7 @@ std::string WebHandler::getXSRFToken(const std::string& cookie) {
     return token;
 }
 
-Asset WebHandler::fetchAssetInfo(long long asset_id, const std::string& cookie, const std::string& xsrf_token) {
+Asset WebHandler::fetchAssetInfo(long long asset_id, const std::string& cookie, std::string& xsrf_token, std::mutex* token_mutex) {
     Asset asset;
     asset.id = asset_id;
     asset.current_price = -1; // Initialize to -1
@@ -105,9 +109,38 @@ Asset WebHandler::fetchAssetInfo(long long asset_id, const std::string& cookie, 
     std::string url = "https://catalog.roblox.com/v1/catalog/items/details";
     std::string json_body = R"({"items":[{"itemType":1,"id":)" + std::to_string(asset_id) + R"(}]})";
 
-    std::string response = post(url, json_body, cookie, xsrf_token);
+    // First attempt to fetch asset info
+    std::pair<std::string, long> post_result = post(url, json_body, cookie, xsrf_token);
+    std::string response = post_result.first;
+    long status_code = post_result.second;
 
-    if (!response.empty()) {
+    // Handle token expiration (403 status)
+    if (status_code == 403) {
+        if (token_mutex) {
+            std::lock_guard<std::mutex> lock(*token_mutex); // Thread-safe token refresh
+            // Refresh token only if it hasn’t been updated by another thread
+            std::string new_token = getXSRFToken(cookie);
+            if (!new_token.empty()) {
+                xsrf_token = new_token;
+            }
+            else {
+                std::cerr << "fetchAssetInfo: Failed to refresh XSRF token for asset ID: " << asset_id << std::endl;
+                return asset; // Return with default values
+            }
+            // Retry with the new token
+            post_result = post(url, json_body, cookie, xsrf_token);
+            response = post_result.first;
+            status_code = post_result.second;
+        }
+        else {
+            std::cerr << "fetchAssetInfo: 403 Forbidden for asset ID: " << asset_id
+                << " - XSRF token may be invalid, but no mutex provided for refresh" << std::endl;
+            return asset; // Return with default values if no mutex is provided
+        }
+    }
+
+    // Process the response
+    if (status_code == 200 && !response.empty()) {
         try {
             nlohmann::json json_response = nlohmann::json::parse(response);
             if (json_response.contains("data") && !json_response["data"].empty()) {
@@ -115,7 +148,7 @@ Asset WebHandler::fetchAssetInfo(long long asset_id, const std::string& cookie, 
 
                 asset.name = data.value("name", "Unknown Asset"); // Use value() with default
 
-                // Get the price.  Prioritize "lowestPrice", then "price", then default to -1.
+                // Get the price. Prioritize "lowestPrice", then "price", then default to -1.
                 if (data.contains("lowestPrice") && !data["lowestPrice"].is_null()) {
                     asset.current_price = data["lowestPrice"].get<int>();
                 }
@@ -129,19 +162,17 @@ Asset WebHandler::fetchAssetInfo(long long asset_id, const std::string& cookie, 
                 asset.thumbnail_url = "https://thumbnails.roblox.com/v1/assets?assetIds=" + std::to_string(asset_id) + "&size=150x150&format=Png";
                 asset.notified = false; // Initialize to false
             }
-            else
-            {
+            else {
                 std::cerr << "fetchAssetInfo: No data found in response for asset ID: " << asset_id << std::endl;
             }
         }
         catch (const std::exception& e) {
             std::cerr << "fetchAssetInfo: JSON parsing error: " << e.what() << std::endl;
-            //  Return the asset with default values (id set, name "Unknown", price -1)
+            // Return the asset with default values (id set, name "Unknown", price -1)
         }
     }
-    else
-    {
-        std::cerr << "fetchAssetInfo: Empty response from post request for asset ID: " << asset_id << std::endl;
+    else {
+        std::cerr << "fetchAssetInfo: Failed with status " << status_code << " for asset ID: " << asset_id << std::endl;
     }
 
     return asset;
