@@ -109,7 +109,7 @@ bool checker_enabled = false;                         // Price checker toggle
 char roblox_cookie[2048] = "";                        // Roblox cookie input
 char webhook_url[1024] = "";                          // Discord webhook URL
 char asset_id_input[64] = "";                         // Asset ID input
-int check_interval_input = 60;                        // Price check interval (seconds)
+int check_interval_input = 30;                        // Price check interval (seconds)
 std::string response_text;                            // Web response text
 std::string debug_info;                               // Debug information
 std::string notification_title;                       // Notification title
@@ -122,7 +122,7 @@ std::mutex assets_mutex;                              // Mutex for thread-safe a
 
 // Main function
 int main(int argc, char** argv) {
-    // AllocateAndRedirectConsole(); // DON'T REMOVE!!! For debugging purposes.
+    AllocateAndRedirectConsole(); // DON'T REMOVE!!! For debugging purposes.
 
     HINSTANCE hInstance = GetModuleHandle(NULL);
 
@@ -130,7 +130,7 @@ int main(int argc, char** argv) {
         sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, hInstance,
         LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ROBLOXPRICEWATCHERV1)),
         LoadCursor(nullptr, IDC_ARROW), nullptr, nullptr,
-        L"Roblox Price Watcher v1.1.0",
+        L"Roblox Price Watcher v1.1.1",
         LoadIcon(hInstance, MAKEINTRESOURCE(IDI_APPLICATION))
     };
     ::RegisterClassExW(&wc);
@@ -145,7 +145,7 @@ int main(int argc, char** argv) {
     HWND hwnd = CreateWindowExW(
         WS_EX_APPWINDOW,
         wc.lpszClassName,
-        L"Roblox Price Watcher v1.1.0",
+        L"Roblox Price Watcher v1.1.1",
         WS_OVERLAPPEDWINDOW,
         posX, posY, windowWidth, windowHeight,
         nullptr, nullptr, wc.hInstance, nullptr
@@ -203,7 +203,6 @@ int main(int argc, char** argv) {
     ImVec4* colors = style.Colors;
     colors[ImGuiCol_WindowBg] = ImVec4(0.10f, 0.11f, 0.13f, 1.00f);
     colors[ImGuiCol_Border] = ImVec4(0.26f, 0.26f, 0.26f, 0.26f);
-    // ... (remaining colors as in the original query)
 
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
@@ -286,6 +285,13 @@ int main(int argc, char** argv) {
             asset_names.push_back(asset.name + " (ID: " + std::to_string(asset.id) + ")");
         }
 
+        float max_width = 300.0f; // Minimum width
+        for (const auto& name : asset_names) {
+            max_width = max(max_width, ImGui::CalcTextSize(name.c_str()).x + 50.0f); // Add padding
+        }
+
+        ImGui::SetNextItemWidth(max_width);
+
         if (ImGui::BeginCombo("##AssetsCombo", selected_asset >= 0 ? asset_names[selected_asset].c_str() : "Select Asset")) {
             for (int n = 0; n < asset_names.size(); n++) {
                 if (ImGui::Selectable(asset_names[n].c_str(), selected_asset == n)) {
@@ -360,11 +366,11 @@ int main(int argc, char** argv) {
             }
 
             ImGui::Spacing();
-            if (price_watcher && price_watcher->running) {
-                std::lock_guard<std::mutex> lock(price_watcher->debug_mutex);
+            if (price_watcher && price_watcher->IsRunning()) { // Use accessor method
                 auto now = std::chrono::steady_clock::now();
-                auto duration = std::chrono::duration_cast<std::chrono::seconds>(price_watcher->next_check_time - now);
-                int seconds_left = duration.count();
+                auto next_check = price_watcher->GetNextCheckTime(); // Use accessor method
+                auto duration = std::chrono::duration_cast<std::chrono::seconds>(next_check - now);
+                long long seconds_left = duration.count(); // Use long long to avoid conversion warning
                 int frame = ImGui::GetFrameCount() / 10 % 4;
 
                 ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.16f, 0.29f, 0.48f, 0.4f));
@@ -373,7 +379,7 @@ int main(int argc, char** argv) {
                 // Prepare the text based on seconds_left and calculate its size
                 char buffer[64]; // Adjust size if needed
                 if (seconds_left > 0) {
-                    sprintf_s(buffer, sizeof(buffer), " %c Updating in %d seconds", "-\\|/"[frame], seconds_left);
+                    sprintf_s(buffer, sizeof(buffer), " %c Updating in %lld seconds", "-\\|/"[frame], seconds_left);
                 }
                 else {
                     sprintf_s(buffer, sizeof(buffer), " %c Updating now", "-\\|/"[frame]);
@@ -392,7 +398,7 @@ int main(int argc, char** argv) {
 
                 // Render the centered text with appropriate color
                 if (seconds_left > 0) {
-                    ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.9f, 1.0f), " %c Updating in %d seconds", "-\\|/"[frame], seconds_left);
+                    ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.9f, 1.0f), " %c Updating in %lld seconds", "-\\|/"[frame], seconds_left);
                 }
                 else {
                     ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.3f, 1.0f), " %c Updating now", "-\\|/"[frame]);
@@ -485,18 +491,7 @@ int main(int argc, char** argv) {
             if (new_xsrf_token != xsrf_token) {
                 xsrf_token = new_xsrf_token;
                 if (!xsrf_token.empty()) {
-                    for (auto* texture : asset_thumbnails) {
-                        if (texture) texture->Release();
-                    }
-                    asset_thumbnails.clear();
-                    assets.clear();
-
-                    assets = LoadAssetsCache(roblox_cookie, xsrf_token);
-                    for (const auto& asset : assets) {
-                        ID3D11ShaderResourceView* texture = image_loader.LoadTextureFromURL(asset.thumbnail_url);
-                        asset_thumbnails.push_back(texture);
-                    }
-
+                    // Don’t clear assets or thumbnails
                     if (price_watcher) {
                         price_watcher->Stop();
                         delete price_watcher;
@@ -778,7 +773,7 @@ int main(int argc, char** argv) {
             ImGui::BeginChild("LogoBanner", ImVec2(0, 80), true);
             ImGui::PushFont(largeFont);
             ImGui::SetCursorPos(ImVec2(20, 25));
-            ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "Roblox Price Watcher v1.1.0");
+            ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "Roblox Price Watcher v1.1.1");
             ImGui::PopFont();
             ImGui::EndChild();
             ImGui::PopStyleColor();
@@ -814,9 +809,13 @@ int main(int argc, char** argv) {
             ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.3f, 0.5f, 0.75f, 1.0f));
             if (ImGui::Button("GitHub", ImVec2(100, 30))) {
                 std::string url = "https://github.com/ProjectBoring/Roblox-Price-Watcher";
-                std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
-                std::wstring wurl = converter.from_bytes(url);
-                ShellExecute(NULL, L"open", wurl.c_str(), NULL, NULL, SW_SHOWNORMAL);
+
+                // Convert std::string (UTF-8) to std::wstring (UTF-16)
+                int size_needed = MultiByteToWideChar(CP_UTF8, 0, url.c_str(), static_cast<int>(url.size()), nullptr, 0);
+                std::wstring wurl(size_needed, 0);
+                MultiByteToWideChar(CP_UTF8, 0, url.c_str(), static_cast<int>(url.size()), &wurl[0], size_needed);
+
+                ShellExecuteW(NULL, L"open", wurl.c_str(), NULL, NULL, SW_SHOWNORMAL);
             }
             ImGui::PopStyleColor(3);
 
