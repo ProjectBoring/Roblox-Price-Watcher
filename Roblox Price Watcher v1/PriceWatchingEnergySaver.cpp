@@ -10,6 +10,23 @@
 #include <future> // For std::async
 #include <vector>
 
+// Conversion utility functions
+std::wstring StringToWString(const std::string& str) {
+    if (str.empty()) return std::wstring();
+    int size_needed = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), static_cast<int>(str.size()), nullptr, 0);
+    std::wstring wstr(size_needed, 0);
+    MultiByteToWideChar(CP_UTF8, 0, str.c_str(), static_cast<int>(str.size()), &wstr[0], size_needed);
+    return wstr;
+}
+
+std::string WStringToString(const std::wstring& wstr) {
+    if (wstr.empty()) return std::string();
+    int size_needed = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), static_cast<int>(wstr.size()), nullptr, 0, nullptr, nullptr);
+    std::string str(size_needed, 0);
+    WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), static_cast<int>(wstr.size()), &str[0], size_needed, nullptr, nullptr);
+    return str;
+}
+
 // Helper function to get the executable directory
 std::wstring GetExecutableDirectory() {
     wchar_t path[MAX_PATH] = { 0 };
@@ -175,8 +192,10 @@ std::string LoadWebhookCache() {
 }
 
 // PriceWatcher implementation
-PriceWatcher::PriceWatcher(const std::string& cookie, const std::string& token, const std::string& webhook, std::vector<Asset>& assets_ref, int check_interval)
-    : roblox_cookie(cookie), xsrf_token(token), webhook_url(webhook), assets(assets_ref), running(false), check_interval_seconds(check_interval) {
+PriceWatcher::PriceWatcher(const std::string& cookie, const std::string& token, const std::string& webhook,
+    std::vector<Asset>& assets_ref, int check_interval)
+    : roblox_cookie(cookie), xsrf_token(token), webhook_url(webhook), assets(assets_ref),
+    running(false), check_interval_seconds(check_interval) {
 }
 
 PriceWatcher::~PriceWatcher() {
@@ -191,7 +210,6 @@ void PriceWatcher::Start() {
             next_check_time = std::chrono::steady_clock::now() + std::chrono::seconds(check_interval_seconds);
         }
         checker_thread = std::thread(&PriceWatcher::PriceCheckLoop, this);
-        // Note: Thread is NOT detached; it remains joinable for proper cleanup
     }
 }
 
@@ -221,10 +239,13 @@ struct PriceUpdate {
 void PriceWatcher::PriceCheckLoop() {
     std::cerr << "PriceCheckLoop: Entering function" << std::endl;
     while (running) {
+        // Update next check time
         {
             std::lock_guard<std::mutex> lock(debug_mutex);
             next_check_time = std::chrono::steady_clock::now() + std::chrono::seconds(check_interval_seconds);
         }
+
+        // Wait for the next check interval
         {
             std::unique_lock<std::mutex> lock(cv_mutex);
             if (cv.wait_for(lock, std::chrono::seconds(check_interval_seconds), [this] { return !running; })) {
@@ -233,6 +254,7 @@ void PriceWatcher::PriceCheckLoop() {
         }
         if (!running) break;
 
+        // Prepare debug output
         std::ostringstream debug_stream;
         auto now = std::chrono::system_clock::now();
         std::time_t now_time = std::chrono::system_clock::to_time_t(now);
@@ -248,23 +270,50 @@ void PriceWatcher::PriceCheckLoop() {
             std::lock_guard<std::mutex> lock(assets_mutex);
             for (const auto& asset : assets) {
                 long long asset_id = asset.id;
-                futures.push_back(std::async(std::launch::async, [asset_id, this]() {
+                futures.push_back(std::async(std::launch::async, [asset_id, this, timestamp]() {
                     WebHandler web;
                     std::string url = "https://catalog.roblox.com/v1/catalog/items/details";
                     std::string json_body = R"({"items":[{"itemType":1,"id":)" + std::to_string(asset_id) + R"(}]})";
-                    std::string response;
-                    try {
-                        response = web.post(url, json_body, roblox_cookie, xsrf_token);
-                        if (!response.empty()) {
+                    std::string local_token = this->xsrf_token;
+
+                    // First attempt to fetch price
+                    auto post_result = web.post(url, json_body, this->roblox_cookie, local_token);
+                    std::string response = post_result.first;
+                    long status_code = post_result.second;
+
+                    // Handle token expiration (403 status)
+                    if (status_code == 403) {
+                        std::lock_guard<std::mutex> lock(this->token_mutex); // Ensure thread-safe token refresh
+                        if (local_token == this->xsrf_token) { // Check if token hasn’t already been refreshed
+                            WebHandler token_web;
+                            std::string new_token = token_web.getXSRFToken(this->roblox_cookie);
+                            if (!new_token.empty()) {
+                                this->xsrf_token = new_token;
+                            }
+                            else {
+                                std::cerr << "Failed to refresh XSRF token for asset " << asset_id << std::endl;
+                                return PriceUpdate{ asset_id, -1 };
+                            }
+                        }
+                        local_token = this->xsrf_token;
+                        // Retry with the new token
+                        post_result = web.post(url, json_body, this->roblox_cookie, local_token);
+                        response = post_result.first;
+                        status_code = post_result.second;
+                    }
+
+                    // Process the response
+                    if (status_code == 200 && !response.empty()) {
+                        try {
                             nlohmann::json json_response = nlohmann::json::parse(response);
                             if (json_response.contains("data") && !json_response["data"].empty() &&
                                 json_response["data"][0].contains("lowestPrice")) {
                                 return PriceUpdate{ asset_id, json_response["data"][0]["lowestPrice"].get<int>() };
                             }
                         }
-                    }
-                    catch (const std::exception& e) {
-                        std::cerr << "Error fetching price for asset " << asset_id << ": " << e.what() << std::endl;
+                        catch (const std::exception& e) {
+                            std::cerr << "Error fetching price for asset " << asset_id << ": " << e.what() << std::endl;
+                        }
                     }
                     return PriceUpdate{ asset_id, -1 };
                     }));
@@ -339,14 +388,48 @@ void PriceWatcher::PriceCheckLoop() {
     std::cerr << "PriceCheckLoop: Exiting function" << std::endl;
 }
 
-void FetchCurrentPrice(Asset& asset, const std::string& cookie, const std::string& xsrf_token) {
+void FetchCurrentPrice(Asset& asset, const std::string& cookie, std::string& xsrf_token, std::mutex* token_mutex) {
     // This function is no longer used directly in PriceCheckLoop, but kept for compatibility
     WebHandler web;
     std::string url = "https://catalog.roblox.com/v1/catalog/items/details";
     std::string json_body = R"({"items":[{"itemType":1,"id":)" + std::to_string(asset.id) + R"(}]})";
-    try {
-        std::string response = web.post(url, json_body, cookie, xsrf_token);
-        if (!response.empty()) {
+
+    // First attempt to fetch price
+    std::pair<std::string, long> post_result = web.post(url, json_body, cookie, xsrf_token);
+    std::string response = post_result.first;
+    long status_code = post_result.second;
+
+    // Handle token expiration (403 status)
+    if (status_code == 403) {
+        if (token_mutex) {
+            std::lock_guard<std::mutex> lock(*token_mutex); // Ensure thread-safe token refresh
+            // Refresh token only if it hasn’t been updated by another thread
+            WebHandler token_web;
+            std::string new_token = token_web.getXSRFToken(cookie);
+            if (!new_token.empty()) {
+                xsrf_token = new_token;
+            }
+            else {
+                std::cerr << "FetchCurrentPrice: Failed to refresh XSRF token for asset " << asset.id << std::endl;
+                asset.current_price = -1;
+                return;
+            }
+            // Retry with the new token
+            post_result = web.post(url, json_body, cookie, xsrf_token);
+            response = post_result.first;
+            status_code = post_result.second;
+        }
+        else {
+            std::cerr << "FetchCurrentPrice: 403 Forbidden for asset " << asset.id
+                << " - XSRF token may be invalid, but no mutex provided for refresh" << std::endl;
+            asset.current_price = -1;
+            return;
+        }
+    }
+
+    // Process the response
+    if (status_code == 200 && !response.empty()) {
+        try {
             nlohmann::json json_response = nlohmann::json::parse(response);
             if (json_response.contains("data") && !json_response["data"].empty() &&
                 json_response["data"][0].contains("lowestPrice")) {
@@ -356,12 +439,13 @@ void FetchCurrentPrice(Asset& asset, const std::string& cookie, const std::strin
                 asset.current_price = -1;
             }
         }
-        else {
+        catch (const std::exception& e) {
+            std::cerr << "FetchCurrentPrice: Exception: " << e.what() << std::endl;
             asset.current_price = -1;
         }
     }
-    catch (const std::exception& e) {
-        std::cerr << "FetchCurrentPrice: Exception: " << e.what() << std::endl;
+    else {
+        std::cerr << "FetchCurrentPrice: Failed with status " << status_code << " for asset " << asset.id << std::endl;
         asset.current_price = -1;
     }
 }
