@@ -11,11 +11,11 @@ class WebHandler {
 public:
     WebHandler();
     ~WebHandler();
-    std::string post(const std::string& url, const std::string& json_body, const std::string& cookie = "", const std::string& xsrf_token = "");
+    std::pair<std::string, long> post(const std::string& url, const std::string& json_body, const std::string& cookie, const std::string& xsrf_token);
     std::string get(const std::string& url); // Added GET method
     std::string getXSRFToken(const std::string& cookie);
 
-    Asset fetchAssetInfo(long long asset_id, const std::string& cookie, const std::string& xsrf_token);
+    Asset fetchAssetInfo(long long asset_id, const std::string& cookie, std::string& xsrf_token, std::mutex* token_mutex = nullptr);
 
 private:
     CURL* curl;
